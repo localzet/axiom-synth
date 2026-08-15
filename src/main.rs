@@ -1,8 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::{
-    collections::{BTreeMap, HashSet},
-    env, fmt, fs,
-};
+use std::{collections::HashSet, env, fmt, fs};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 enum Expr {
@@ -13,41 +10,44 @@ enum Expr {
     Sub(Box<Expr>, Box<Expr>),
     IfNeg(Box<Expr>, Box<Expr>),
 }
+
 impl Expr {
     fn eval(&self, x: i64) -> i64 {
         match self {
             Self::X => x,
-            Self::Const(v) => *v,
-            Self::Neg(a) => a.eval(x).wrapping_neg(),
-            Self::Add(a, b) => a.eval(x).wrapping_add(b.eval(x)),
-            Self::Sub(a, b) => a.eval(x).wrapping_sub(b.eval(x)),
-            Self::IfNeg(a, b) => {
+            Self::Const(value) => *value,
+            Self::Neg(inner) => inner.eval(x).wrapping_neg(),
+            Self::Add(left, right) => left.eval(x).wrapping_add(right.eval(x)),
+            Self::Sub(left, right) => left.eval(x).wrapping_sub(right.eval(x)),
+            Self::IfNeg(negative, nonnegative) => {
                 if x < 0 {
-                    a.eval(x)
+                    negative.eval(x)
                 } else {
-                    b.eval(x)
+                    nonnegative.eval(x)
                 }
             }
         }
     }
+
     fn cost(&self) -> usize {
         match self {
             Self::X | Self::Const(_) => 1,
-            Self::Neg(a) => 1 + a.cost(),
-            Self::Add(a, b) | Self::Sub(a, b) => 1 + a.cost() + b.cost(),
-            Self::IfNeg(a, b) => 2 + a.cost() + b.cost(),
+            Self::Neg(inner) => 1 + inner.cost(),
+            Self::Add(left, right) | Self::Sub(left, right) => 1 + left.cost() + right.cost(),
+            Self::IfNeg(left, right) => 2 + left.cost() + right.cost(),
         }
     }
 }
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::X => write!(f, "x"),
-            Self::Const(v) => write!(f, "{v}"),
-            Self::Neg(a) => write!(f, "(-{a})"),
-            Self::Add(a, b) => write!(f, "({a}+{b})"),
-            Self::Sub(a, b) => write!(f, "({a}-{b})"),
-            Self::IfNeg(a, b) => write!(f, "if x<0 {{{a}}} else {{{b}}}"),
+            Self::Const(value) => write!(f, "{value}"),
+            Self::Neg(inner) => write!(f, "(-{inner})"),
+            Self::Add(left, right) => write!(f, "({left} + {right})"),
+            Self::Sub(left, right) => write!(f, "({left} - {right})"),
+            Self::IfNeg(left, right) => write!(f, "if x < 0 then {left} else {right}"),
         }
     }
 }
@@ -55,205 +55,178 @@ impl fmt::Display for Expr {
 fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     if args.next().as_deref() != Some("synth") {
-        bail!("usage: axiom-synth synth spec.aix --out candidate.axp [--max-depth N]");
+        bail!("usage: axiom-synth synth spec.aix --examples examples.axexamples --out candidate.axp [--max-depth N]");
     }
     let spec_path = args.next().context("missing spec.aix")?;
+    if args.next().as_deref() != Some("--examples") {
+        bail!("expected --examples");
+    }
+    let examples_path = args.next().context("missing examples file")?;
     if args.next().as_deref() != Some("--out") {
         bail!("expected --out");
     }
-    let out = args.next().context("missing output path")?;
+    let out_path = args.next().context("missing output path")?;
+
     let mut max_depth = 3usize;
     if let Some(flag) = args.next() {
         if flag != "--max-depth" {
-            bail!("unexpected flag {flag}");
+            bail!("unexpected flag: {flag}");
         }
         max_depth = args.next().context("missing depth")?.parse()?;
     }
-    let doc = parse_ir(&fs::read_to_string(spec_path)?)?;
-    let min: i64 = doc["domain.min"].parse()?;
-    let max: i64 = doc["domain.max"].parse()?;
-    let clauses = ensures(&doc);
+
+    let spec = fs::read_to_string(spec_path)?;
+    let module = parse_value(&spec, "module")?.to_owned();
+    let examples = parse_examples(&fs::read_to_string(examples_path)?)?;
+    let candidate = synthesize(&examples, max_depth).context("no candidate found")?;
+    fs::write(out_path, emit_program(&module, &candidate))?;
+    println!("synthesized: {candidate} (cost={})", candidate.cost());
+    Ok(())
+}
+
+fn synthesize(examples: &[(i64, i64)], max_depth: usize) -> Option<Expr> {
     let mut universe = vec![Expr::X, Expr::Const(-1), Expr::Const(0), Expr::Const(1)];
-    let mut seen: HashSet<Vec<i64>> = HashSet::new();
-    let mut best = None;
+    let mut signatures: HashSet<Vec<i64>> = HashSet::new();
+
     for depth in 0..=max_depth {
-        let current = universe.clone();
-        for e in &current {
-            let signature: Vec<i64> = (min..=max).map(|x| e.eval(x)).collect();
-            if !seen.insert(signature) {
+        universe.sort_by_key(Expr::cost);
+        for expr in universe.clone() {
+            let signature: Vec<_> = examples.iter().map(|(x, _)| expr.eval(*x)).collect();
+            if !signatures.insert(signature) {
                 continue;
             }
-            if (min..=max).all(|x| {
-                clauses
-                    .iter()
-                    .all(|c| eval_bool(c, x, e.eval(x)).unwrap_or(false))
-            }) {
-                best = Some(e.clone());
-                break;
+            if examples
+                .iter()
+                .all(|(x, expected)| expr.eval(*x) == *expected)
+            {
+                return Some(expr);
             }
         }
-        if best.is_some() {
-            break;
-        }
+
         if depth == max_depth {
             break;
         }
         let base = universe.clone();
-        for a in &base {
-            universe.push(Expr::Neg(Box::new(a.clone())));
+        for inner in &base {
+            universe.push(Expr::Neg(Box::new(inner.clone())));
         }
-        for a in &base {
-            for b in &base {
-                if a.cost() + b.cost() <= 8 {
-                    universe.push(Expr::Add(Box::new(a.clone()), Box::new(b.clone())));
-                    universe.push(Expr::Sub(Box::new(a.clone()), Box::new(b.clone())));
-                    universe.push(Expr::IfNeg(Box::new(a.clone()), Box::new(b.clone())));
+        for left in &base {
+            for right in &base {
+                if left.cost() + right.cost() > 8 {
+                    continue;
                 }
+                universe.push(Expr::Add(Box::new(left.clone()), Box::new(right.clone())));
+                universe.push(Expr::Sub(Box::new(left.clone()), Box::new(right.clone())));
+                universe.push(Expr::IfNeg(Box::new(left.clone()), Box::new(right.clone())));
             }
         }
         universe.sort_by_key(Expr::cost);
-        universe.truncate(10000);
+        universe.truncate(20_000);
     }
-    let e = best.context("no satisfying program found within search bound")?;
-    fs::write(out, emit_program(&doc, &e))?;
-    println!("synthesized: {e} (cost={})", e.cost());
-    Ok(())
+    None
 }
 
-fn emit_program(doc: &BTreeMap<String, String>, e: &Expr) -> String {
+fn parse_examples(raw: &str) -> Result<Vec<(i64, i64)>> {
+    let mut lines = raw.lines();
+    if lines.next() != Some("AXIOM-EXAMPLES/1") {
+        bail!("bad examples header");
+    }
+    let mut out = Vec::new();
+    for line in lines.filter(|line| !line.trim().is_empty()) {
+        let mut x = None;
+        let mut result = None;
+        for field in line.split(',') {
+            let (key, value) = field.split_once('=').context("bad example field")?;
+            match key.trim() {
+                "x" => x = Some(value.trim().parse()?),
+                "result" => result = Some(value.trim().parse()?),
+                _ => bail!("unknown example key: {key}"),
+            }
+        }
+        out.push((
+            x.context("example misses x")?,
+            result.context("example misses result")?,
+        ));
+    }
+    Ok(out)
+}
+
+fn parse_value<'a>(raw: &'a str, key: &str) -> Result<&'a str> {
+    raw.lines()
+        .find_map(|line| line.strip_prefix(&format!("{key}=")))
+        .context("missing key")
+}
+
+fn emit_program(module: &str, expr: &Expr) -> String {
     let mut code = Vec::new();
-    let reg = compile(e, &mut code);
-    code.push(format!("RETURN r{reg}"));
+    let register = compile(expr, &mut code);
+    code.push(format!("RETURN r{register}"));
     format!(
-        "AXIOM-PROGRAM/1\nmodule={}\ncapabilities=\nsource_expr={}\ncode:\n{}\nend\n",
-        doc["module"],
-        e,
+        "AXIOM-PROGRAM/2\nmodule={module}\ninputs=x\noutput=result\ncapabilities=\nsource.expr={expr}\ncode:\n{}\nend\n",
         code.join("\n")
     )
 }
-fn compile(e: &Expr, code: &mut Vec<String>) -> usize {
-    match e {
+
+fn compile(expr: &Expr, code: &mut Vec<String>) -> usize {
+    match expr {
         Expr::X => {
-            let r = next_reg(code);
-            code.push(format!("LOAD_INPUT r{r} x"));
-            r
+            let dest = next_register(code);
+            code.push(format!("LOAD_INPUT r{dest} x"));
+            dest
         }
-        Expr::Const(v) => {
-            let r = next_reg(code);
-            code.push(format!("CONST r{r} {v}"));
-            r
+        Expr::Const(value) => {
+            let dest = next_register(code);
+            code.push(format!("CONST r{dest} {value}"));
+            dest
         }
-        Expr::Neg(a) => {
-            let x = compile(a, code);
-            let r = next_reg(code);
-            code.push(format!("NEG r{r} r{x}"));
-            r
+        Expr::Neg(inner) => {
+            let source = compile(inner, code);
+            let dest = next_register(code);
+            code.push(format!("NEG r{dest} r{source}"));
+            dest
         }
-        Expr::Add(a, b) => {
-            let x = compile(a, code);
-            let y = compile(b, code);
-            let r = next_reg(code);
-            code.push(format!("ADD r{r} r{x} r{y}"));
-            r
+        Expr::Add(left, right) => {
+            let left = compile(left, code);
+            let right = compile(right, code);
+            let dest = next_register(code);
+            code.push(format!("ADD r{dest} r{left} r{right}"));
+            dest
         }
-        Expr::Sub(a, b) => {
-            let x = compile(a, code);
-            let y = compile(b, code);
-            let r = next_reg(code);
-            code.push(format!("SUB r{r} r{x} r{y}"));
-            r
+        Expr::Sub(left, right) => {
+            let left = compile(left, code);
+            let right = compile(right, code);
+            let dest = next_register(code);
+            code.push(format!("SUB r{dest} r{left} r{right}"));
+            dest
         }
-        Expr::IfNeg(a, b) => {
-            let x = compile(a, code);
-            let y = compile(b, code);
-            let r = next_reg(code);
-            code.push(format!("SELECT_NEG r{r} r{x} r{y}"));
-            r
+        Expr::IfNeg(negative, nonnegative) => {
+            let negative = compile(negative, code);
+            let nonnegative = compile(nonnegative, code);
+            let dest = next_register(code);
+            code.push(format!(
+                "SELECT_NEG_INPUT r{dest} x r{negative} r{nonnegative}"
+            ));
+            dest
         }
     }
 }
-fn next_reg(code: &[String]) -> usize {
+
+fn next_register(code: &[String]) -> usize {
     code.iter()
-        .filter_map(|l| l.split_whitespace().nth(1))
-        .filter_map(|r| r.strip_prefix('r'))
-        .filter_map(|n| n.parse::<usize>().ok())
+        .flat_map(|line| line.split_whitespace())
+        .filter_map(|word| word.strip_prefix('r'))
+        .filter_map(|number| number.parse::<usize>().ok())
         .max()
-        .map(|n| n + 1)
+        .map(|number| number + 1)
         .unwrap_or(0)
 }
-fn parse_ir(raw: &str) -> Result<BTreeMap<String, String>> {
-    let mut it = raw.lines();
-    if it.next() != Some("AXIOM-IR/1") {
-        bail!("bad IR header");
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn examples_force_abs_shape() {
+        let candidate = synthesize(&[(0, 0), (-1, 1), (1, 1)], 3).unwrap();
+        assert_eq!(candidate.eval(-7), 7);
+        assert_eq!(candidate.eval(9), 9);
     }
-    let mut m = BTreeMap::new();
-    for l in it.filter(|l| !l.trim().is_empty()) {
-        let (k, v) = l.split_once('=').context("bad IR line")?;
-        m.insert(k.to_owned(), v.to_owned());
-    }
-    Ok(m)
-}
-fn ensures(doc: &BTreeMap<String, String>) -> Vec<String> {
-    doc.iter()
-        .filter(|(k, _)| k.starts_with("ensures."))
-        .map(|(_, v)| v.clone())
-        .collect()
-}
-fn eval_bool(expr: &str, x: i64, result: i64) -> Result<bool> {
-    let e = expr.trim();
-    if let Some((a, b)) = split_top(e, "||") {
-        return Ok(eval_bool(a, x, result)? || eval_bool(b, x, result)?);
-    }
-    if let Some((a, b)) = split_top(e, "&&") {
-        return Ok(eval_bool(a, x, result)? && eval_bool(b, x, result)?);
-    }
-    for op in ["==", "!=", ">=", "<=", ">", "<"] {
-        if let Some((a, b)) = split_top(e, op) {
-            let a = eval_int(a, x, result)?;
-            let b = eval_int(b, x, result)?;
-            return Ok(match op {
-                "==" => a == b,
-                "!=" => a != b,
-                ">=" => a >= b,
-                "<=" => a <= b,
-                ">" => a > b,
-                "<" => a < b,
-                _ => unreachable!(),
-            });
-        }
-    }
-    if e == "true" {
-        return Ok(true);
-    }
-    if e == "false" {
-        return Ok(false);
-    }
-    bail!("unsupported clause: {e}")
-}
-fn eval_int(expr: &str, x: i64, result: i64) -> Result<i64> {
-    let e = expr.trim().trim_matches(|c| c == '(' || c == ')').trim();
-    match e {
-        "x" => Ok(x),
-        "result" => Ok(result),
-        "-x" => Ok(x.wrapping_neg()),
-        _ => Ok(e.parse()?),
-    }
-}
-fn split_top<'a>(expr: &'a str, op: &str) -> Option<(&'a str, &'a str)> {
-    let mut depth = 0i32;
-    let b = expr.as_bytes();
-    let o = op.as_bytes();
-    let mut i = 0;
-    while i + o.len() <= b.len() {
-        match b[i] as char {
-            '(' => depth += 1,
-            ')' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 && &b[i..i + o.len()] == o {
-            return Some((&expr[..i], &expr[i + o.len()..]));
-        }
-        i += 1;
-    }
-    None
 }

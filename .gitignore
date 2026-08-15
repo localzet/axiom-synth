@@ -1,6 +1,9 @@
-/target
-*.axproof.tmp
-*.trace
+/target/
+__pycache__/
+*.pyc
+*.pyo
+*.tmp
+*.log
 .DS_Store
-.idea/
 .vscode/
+.idea/
