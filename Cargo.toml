@@ -1,0 +1,11 @@
+[package]
+name = "axiom-synth"
+version = "0.1.0"
+edition = "2021"
+description = "Enumerative program synthesizer for Axiom specifications"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+

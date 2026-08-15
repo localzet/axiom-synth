@@ -1,0 +1,6 @@
+/target
+*.axproof.tmp
+*.trace
+.DS_Store
+.idea/
+.vscode/
