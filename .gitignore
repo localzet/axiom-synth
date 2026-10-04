@@ -7,3 +7,15 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+
+target/
+
+*.py[cod]
+
+.lake/
+
+.env
+
+*.key
+
+*.pem

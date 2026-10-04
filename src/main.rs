@@ -223,10 +223,15 @@ fn next_register(code: &[String]) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use super::synthesize;
+
     #[test]
-    fn examples_force_abs_shape() {
+    fn fits_examples_without_proving_generalization() {
         let candidate = synthesize(&[(0, 0), (-1, 1), (1, 1)], 3).unwrap();
-        assert_eq!(candidate.eval(-7), 7);
-        assert_eq!(candidate.eval(9), 9);
+        for (input, output) in [(0, 0), (-1, 1), (1, 1)] {
+            assert_eq!(candidate.eval(input), output);
+        }
+        // Finite examples admit cheaper candidates that overfit.
+        assert_ne!(candidate.eval(-7), 7);
     }
 }

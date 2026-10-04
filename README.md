@@ -1,5 +1,9 @@
 # axiom-synth v0.2.0
 
-Grammar-based candidate generator used by the CEGIS loop. v0.2 separates **candidate generation** from **candidate
-authority**: this repository only has to fit the current finite example set. `axiom-symbolic` remains responsible for
-universal proof or counterexample production.
+Grammar-based генератор кандидатов, используемый CEGIS-циклом. В v0.2 **генерация кандидата** отделена от **полномочия
+признать его корректным**: этот репозиторий должен лишь подобрать программу, удовлетворяющую текущему конечному набору
+примеров. За универсальное доказательство либо выдачу контрпримера отвечает `axiom-symbolic`.
+
+## Связанные исследования
+
+Этот компонент входит в исследовательский проект [Axiom](https://github.com/localzet/axiom-stack). Все компоненты собраны по теме [localzet-axiom](https://github.com/topics/localzet-axiom). Основной язык документации — русский. Исследовательские результаты и ограничения не означают готовность к промышленному применению.
