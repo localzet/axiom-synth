@@ -1,4 +1,5 @@
 [package]
+authors = ["Ivan Zorin <creator@localzet.com>"]
 name = "axiom-synth"
 version = "0.2.0"
 edition = "2021"
